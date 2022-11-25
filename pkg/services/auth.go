@@ -114,14 +114,35 @@ func (as *neo4jAuthService) Save(email, plainPassword, name string) (_ User, err
 
 // tag::authenticate[]
 func (as *neo4jAuthService) FindOneByEmailAndPassword(email string, password string) (_ User, err error) {
-	// TODO: Authenticate the user from the database
-	if email != "graphacademy@neo4j.com" {
-		return nil, fmt.Errorf("Incorrect username or password")
-	}
+	session := as.driver.NewSession(neo4j.SessionConfig{})
 
-	user, err := as.loader.ReadObject("fixtures/user.json")
+	defer func() {
+		err = ioutils.DeferredClose(session, err)
+	}()
+
+	result, err := session.ReadTransaction(func(tx neo4j.Transaction) (interface{}, error) {
+		result, err := tx.Run(`
+			MATCH (u:User {email: $email}) RETURN u`,
+			map[string]interface{}{
+				"email": email,
+			})
+
+		record, err := result.Single()
+		if err != nil {
+			return nil, fmt.Errorf("account not found or multiple ones")
+		}
+
+		user, _ := record.Get("u")
+		return user, nil
+	})
 	if err != nil {
 		return nil, err
+	}
+
+	userNode := result.(neo4j.Node)
+	user := userNode.Props
+	if !verifyPassword(password, user["password"].(string)) {
+		return nil, fmt.Errorf("account not found or incorrect password")
 	}
 
 	subject := user["userId"].(string)
