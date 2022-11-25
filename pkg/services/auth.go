@@ -52,7 +52,7 @@ func (as *neo4jAuthService) Save(email, plainPassword, name string) (_ User, err
 	}()
 
 	result, err := session.WriteTransaction(func(tx neo4j.Transaction) (interface{}, error) {
-		encryptedPassword, err := encryptPassword(plainPassword, 10)
+		encryptedPassword, err := encryptPassword(plainPassword, as.saltRounds)
 		if err != nil {
 			return nil, err
 		}
