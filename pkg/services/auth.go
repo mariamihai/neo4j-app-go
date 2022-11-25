@@ -57,6 +57,11 @@ func (as *neo4jAuthService) Save(email, plainPassword, name string) (_ User, err
 			return nil, err
 		}
 
+		// Ensure the email is unique with constraint:
+		// CREATE CONSTRAINT UserEmailUnique
+		// IF NOT EXISTS
+		// FOR (user:User)
+		// REQUIRE user.email IS UNIQUE;
 		result, err := tx.Run(`
 			CREATE (u:User {
 				userId: randomUuid(),
@@ -70,6 +75,16 @@ func (as *neo4jAuthService) Save(email, plainPassword, name string) (_ User, err
 				"encrypted": encryptedPassword,
 				"name":      name,
 			})
+
+		if neo4jError, ok := err.(*neo4j.Neo4jError); ok && neo4jError.Title() == "ConstraintValidationFailed" {
+			return nil, NewDomainError(
+				422,
+				fmt.Sprintf("An account already exists with the email address %s", email),
+				map[string]interface{}{
+					"email": "Email address taken",
+				},
+			)
+		}
 
 		record, err := result.Single()
 		if err != nil {
