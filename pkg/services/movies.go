@@ -2,10 +2,8 @@ package services
 
 import (
 	"fmt"
-	"github.com/neo4j-graphacademy/neoflix/pkg/ioutils"
-	"math/rand"
-
 	"github.com/neo4j-graphacademy/neoflix/pkg/fixtures"
+	"github.com/neo4j-graphacademy/neoflix/pkg/ioutils"
 
 	"github.com/neo4j-graphacademy/neoflix/pkg/routes/paging"
 	"github.com/neo4j/neo4j-go-driver/v4/neo4j"
@@ -309,10 +307,49 @@ func (ms *neo4jMovieService) FindAllByDirectorId(actorId string, userId string, 
 // signify whether the user has added the movie to their "My Favorites" list.
 // tag::findById[]
 func (ms *neo4jMovieService) FindOneById(id string, userId string) (_ Movie, err error) {
-	// TODO: Find a movie by its ID
-	// MATCH (m:Movie {tmdbId: $id})
+	session := ms.driver.NewSession(neo4j.SessionConfig{})
 
-	return ms.loader.ReadObject("fixtures/goodfellas.json")
+	defer func() {
+		err = ioutils.DeferredClose(session, err)
+	}()
+
+	result, err := session.ReadTransaction(func(tx neo4j.Transaction) (interface{}, error) {
+		favorites, err := getUserFavorites(tx, userId)
+		if err != nil {
+			return nil, err
+		}
+
+		result, err := tx.Run(`
+			MATCH (m:Movie {tmdbId: $id})
+			RETURN m {
+			  .*,
+				actors: [ (a)-[r:ACTED_IN]->(m) | a { .*, role: r.role } ],
+				directors: [ (d)-[:DIRECTED]->(m) | d { .* } ],
+				genres: [ (m)-[:IN_GENRE]->(g) | g { .name }],
+				ratingCount: size((m)<-[:RATED]-()),
+				favorite: m.tmdbId IN $favorites
+			} AS movie
+			LIMIT 1`,
+			map[string]interface{}{
+				"id":        id,
+				"favorites": favorites,
+			})
+		if err != nil {
+			return nil, err
+		}
+
+		record, err := result.Single()
+		if err != nil {
+			return nil, err
+		}
+		movie, _ := record.Get("movie")
+		return movie, nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return result.(Movie), nil
 }
 
 // end::findById[]
@@ -330,16 +367,62 @@ func (ms *neo4jMovieService) FindOneById(id string, userId string) (_ Movie, err
 // signify whether the user has added the movie to their "My Favorites" list.
 // tag::getSimilarMovies[]
 func (ms *neo4jMovieService) FindAllBySimilarity(id string, userId string, page *paging.Paging) (_ []Movie, err error) {
-	// TODO: Get similar movies based on genres or ratings
-	popularMovies, err := ms.loader.ReadArray("fixtures/popular.json")
+	session := ms.driver.NewSession(neo4j.SessionConfig{})
+	defer func() {
+		err = ioutils.DeferredClose(session, err)
+	}()
+
+	result, err := session.ReadTransaction(func(tx neo4j.Transaction) (interface{}, error) {
+		favorites, err := getUserFavorites(tx, userId)
+		if err != nil {
+			return nil, err
+		}
+
+		// Doesn't work in v5
+		result, err := tx.Run(`
+			MATCH (:Movie {tmdbId: $id})-[:IN_GENRE|ACTED_IN|DIRECTED]->()<-[:IN_GENRE|ACTED_IN|DIRECTED]-(m)
+			WHERE m.imdbRating IS NOT NULL
+
+			WITH m, count(*) AS inCommon
+			WITH m, inCommon, m.imdbRating * inCommon AS score
+			ORDER BY score DESC
+
+			SKIP $skip
+			LIMIT $limit
+
+			RETURN m {
+				.*,
+				score: score,
+				favorite: m.tmdbId IN $favorites
+			} AS movie
+		`, map[string]interface{}{
+			"id":        id,
+			"favorites": favorites,
+			"skip":      page.Skip(),
+			"limit":     page.Limit(),
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		records, err := result.Collect()
+		if err != nil {
+			return nil, err
+		}
+
+		var results []map[string]interface{}
+		for _, record := range records {
+			movie, _ := record.Get("movie")
+			results = append(results, movie.(map[string]interface{}))
+		}
+
+		return results, nil
+	})
+
 	if err != nil {
 		return nil, err
 	}
-	results := fixtures.Slice(popularMovies, page.Skip(), page.Limit())
-	for _, movie := range results {
-		movie["score"] = rand.Intn(100)
-	}
-	return results, nil
+	return result.([]Movie), nil
 }
 
 // end::getSimilarMovies[]
