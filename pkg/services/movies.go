@@ -51,16 +51,25 @@ func (ms *neo4jMovieService) FindAll(userId string, page *paging.Paging) (_ []Mo
 	}()
 
 	results, err := session.ReadTransaction(func(tx neo4j.Transaction) (interface{}, error) {
+		favorites, err := getUserFavorites(tx, userId)
+		if err != nil {
+			return nil, err
+		}
+
 		result, err := tx.Run(fmt.Sprintf(`
 			MATCH (m:Movie)
 			WHERE m.`+"`%[1]s`"+` IS NOT NULL
-			RETURN m { .* } AS movie
+			RETURN m { 
+				.* ,
+				favorite: m.tmdbId IN $favorites
+			} AS movie
 			ORDER BY m.`+"`%[1]s`"+` %s
 			SKIP $skip
 			LIMIT $limit
 		`, page.Sort(), page.Order()), map[string]interface{}{
-			"skip":  page.Skip(),
-			"limit": page.Limit(),
+			"skip":      page.Skip(),
+			"limit":     page.Limit(),
+			"favorites": favorites,
 		})
 		if err != nil {
 			return nil, err
@@ -210,7 +219,25 @@ func (ms *neo4jMovieService) FindAllBySimilarity(id string, userId string, page 
 // the user has added to their 'My Favorites' list.
 // tag::getUserFavorites[]
 func getUserFavorites(tx neo4j.Transaction, userId string) ([]string, error) {
-	return nil, nil
+	if userId == "" {
+		return nil, nil
+	}
+
+	result, err := tx.Run(`
+		MATCH (u:User {userId: $userId})-[:HAS_FAVORITE]->(m)
+		RETURN m.tmdbId AS id
+	`, map[string]interface{}{"userId": userId})
+	if err != nil {
+		return nil, err
+	}
+
+	var ids []string
+	for result.Next() {
+		record := result.Record()
+		id, _ := record.Get("id")
+		ids = append(ids, id.(string))
+	}
+	return ids, nil
 }
 
 // end::getUserFavorites[]
