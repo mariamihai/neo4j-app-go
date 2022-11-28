@@ -47,3 +47,6 @@ From the point of view of the course, you can go ahead and ignore them.
 
 == Errors
 link:https://neo4j.com/docs/status-codes/current/[link]
+
+== Load movies
+From fixtures / load-movies.cypher
