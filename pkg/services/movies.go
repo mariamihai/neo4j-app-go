@@ -1,6 +1,8 @@
 package services
 
 import (
+	"fmt"
+	"github.com/neo4j-graphacademy/neoflix/pkg/ioutils"
 	"math/rand"
 
 	"github.com/neo4j-graphacademy/neoflix/pkg/fixtures"
@@ -42,17 +44,56 @@ func NewMovieService(loader *fixtures.FixtureLoader, driver neo4j.Driver) MovieS
 // signify whether the user has added the movie to their "My Favorites" list.
 // tag::all[]
 func (ms *neo4jMovieService) FindAll(userId string, page *paging.Paging) (_ []Movie, err error) {
-	// TODO: Open an Session
-	// TODO: Execute a query in a new Read Transaction
-	// TODO: Get a list of Movies from the Result
-	// TODO: Close the session
+	session := ms.driver.NewSession(neo4j.SessionConfig{})
 
-	popularMovies, err := ms.loader.ReadArray("fixtures/popular.json")
+	defer func() {
+		err = ioutils.DeferredClose(session, err)
+	}()
+
+	results, err := session.ReadTransaction(func(tx neo4j.Transaction) (interface{}, error) {
+		favorites, err := getUserFavorites(tx, userId)
+		if err != nil {
+			return nil, err
+		}
+
+		result, err := tx.Run(fmt.Sprintf(`
+			MATCH (m:Movie)
+			WHERE m.`+"`%[1]s`"+` IS NOT NULL
+			RETURN m { 
+				.* ,
+				favorite: m.tmdbId IN $favorites
+			} AS movie
+			ORDER BY m.`+"`%[1]s`"+` %s
+			SKIP $skip
+			LIMIT $limit
+		`, page.Sort(), page.Order()), map[string]interface{}{
+			"skip":      page.Skip(),
+			"limit":     page.Limit(),
+			"favorites": favorites,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		records, err := result.Collect()
+		if err != nil {
+			return nil, err
+		}
+
+		var results []map[string]interface{}
+		for _, record := range records {
+			movie, _ := record.Get("movie")
+			results = append(results, movie.(map[string]interface{}))
+		}
+
+		return results, nil
+	})
+
 	if err != nil {
 		return nil, err
 	}
 
-	return fixtures.Slice(popularMovies, page.Skip(), page.Limit()), err
+	return fixtures.Slice(results.([]Movie), page.Skip(), page.Limit()), nil
 }
 
 // end::all[]
@@ -178,7 +219,25 @@ func (ms *neo4jMovieService) FindAllBySimilarity(id string, userId string, page 
 // the user has added to their 'My Favorites' list.
 // tag::getUserFavorites[]
 func getUserFavorites(tx neo4j.Transaction, userId string) ([]string, error) {
-	return nil, nil
+	if userId == "" {
+		return nil, nil
+	}
+
+	result, err := tx.Run(`
+		MATCH (u:User {userId: $userId})-[:HAS_FAVORITE]->(m)
+		RETURN m.tmdbId AS id
+	`, map[string]interface{}{"userId": userId})
+	if err != nil {
+		return nil, err
+	}
+
+	var ids []string
+	for result.Next() {
+		record := result.Record()
+		id, _ := record.Get("id")
+		ids = append(ids, id.(string))
+	}
+	return ids, nil
 }
 
 // end::getUserFavorites[]
